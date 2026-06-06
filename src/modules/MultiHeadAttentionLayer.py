@@ -33,6 +33,7 @@ class MultiHeadAttentionLayer(nn.Module):
         is_causal=False,
         canon=False,
         canon_length: int = 3,
+        eot_id: int = 1,
         device=None,
         dtype=None,
     ):
@@ -70,7 +71,7 @@ class MultiHeadAttentionLayer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        valid_tokens: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
         kv_cache = None,
         prefill = False,
     ) -> torch.Tensor:
@@ -84,7 +85,7 @@ class MultiHeadAttentionLayer(nn.Module):
 
         Args:
             x (torch.Tensor): input of shape (``B``, ``L``, ``E``) (L = 1 if using kv_cache)
-            valid_tokens (torch.Tensor): input of shape (``B``, ``L``) (True or False. True means take apart in attention. used for padding, not causal)
+            attn_mask (torch.Tensor): input of shape (``B``, ``1``, ``L``, ``L``)
             kv_cache (dic[str -> torch.Tensor]): Contains: "K", "V" (Optional: "c_1", "c_2", "c_3")
             prefill (bool): Are we prefilling the cache
             
@@ -137,28 +138,6 @@ class MultiHeadAttentionLayer(nn.Module):
         # Step 3. Run SDPA
         # (B, nheads, L, E_head)
         dropout_p = self.dropout if self.training else 0.0
-
-        attn_mask = None
-
-        if (valid_tokens is not None):
-            # (B, 1, 1, L)
-            attn_mask = valid_tokens[:, None, None, :]
-
-        if self.is_causal:
-            # (L, L)
-            causal_mask = torch.ones(L, L, device=x.device, dtype=torch.bool).tril()
-            # (1, 1, L, L)
-            causal_mask = causal_mask[None, None, :, :]
-
-            if attn_mask is None:
-                # (1, 1, L, L)
-                attn_mask = causal_mask
-            else:
-                # (B, 1, L, L)    
-                attn_mask = causal_mask & attn_mask
-
-        if kv_cache is not None:
-            attn_mask = None
 
         attn_output = F.scaled_dot_product_attention(
             query, key, value, dropout_p=dropout_p, is_causal=False, attn_mask=attn_mask

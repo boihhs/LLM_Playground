@@ -31,12 +31,16 @@ class BaseModel(nn.Module, ABC):
         self.E = config.E
         self.nheads = config.nheads
         self.nlayers = config.nlayers
+        self.bias = config.bias
         self.shared_encoder_decoder = config.shared_encoder_decoder
+        self.num_steps = config.num_steps
+        self.device = config.device
 
         padding_idx = self.pad_id
         if not self.is_causal:
             padding_idx = None
         self.encoder = nn.Embedding(config.vocab_size, config.E, padding_idx=padding_idx, **factory_kwargs)
+        nn.init.normal_(self.encoder.weight, mean=0.0, std=0.02)
 
         self.layers = nn.ModuleList(
             [MultiHeadAttentionLayer(
@@ -47,6 +51,7 @@ class BaseModel(nn.Module, ABC):
                 is_causal=config.is_causal,
                 canon=config.canon,
                 canon_length=config.canon_length,
+                eot_id=config.eot_id,
                 **factory_kwargs,
             )
             for i in range(config.nlayers)]
@@ -59,9 +64,12 @@ class BaseModel(nn.Module, ABC):
         else:
             self.decoder_bias = nn.Parameter(torch.zeros(config.vocab_size, **factory_kwargs))
 
+        weight = None
         if not self.is_causal:
             padding_idx = -100
-        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=padding_idx, reduction="mean")
+            weight = torch.ones((config.vocab_size), **self.factory_kwargs)
+            weight[self.pad_id] = 1e-4
+        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=padding_idx, reduction="mean", weight=weight)
 
     def autoreg_loss(self,
                   x: torch.Tensor,
@@ -81,6 +89,37 @@ class BaseModel(nn.Module, ABC):
         loss = self.cross_entropy(x.reshape((B*L, N)), ground_truth.reshape((B*L)))
         return loss
     
+    def compute_attn_mask(self, x: torch.Tensor, x_tok_ids: torch.Tensor | None = None):
+        B, L, E = x.shape
+
+        if x_tok_ids is not None:
+            # (B, L) -> (B, L)
+            eot_sep = x_tok_ids == self.eot_id
+            # (B, L)
+            eot_sep_cum_sum = torch.cumsum(eot_sep, -1, dtype=torch.int) - eot_sep.int()
+            # (B, L) -> (B, 1, L) == (B, L, 1) -> (B, L, L)
+            attn_mask = eot_sep_cum_sum[:, None, :] == eot_sep_cum_sum[:, :, None]
+            # (B, 1, L, L)
+            attn_mask = attn_mask[:, None, :, :]
+        else:
+            attn_mask = None
+
+        if self.is_causal:
+            # (L, L)
+            causal_mask = torch.ones(L, L, device=x.device, dtype=torch.bool).tril()
+            # (1, 1, L, L)
+            causal_mask = causal_mask[None, None, :, :]
+
+            if attn_mask is not None:
+                # (B, 1, L, L)    
+                attn_mask = causal_mask & attn_mask
+            else:
+                # (1, 1, L, L)
+                attn_mask = causal_mask
+
+        return attn_mask
+
+
     def encode(self, x: torch.Tensor):
         """
         Encodes Token Ids into latent dimension
@@ -93,7 +132,7 @@ class BaseModel(nn.Module, ABC):
         # (B, L) -> (B, L, E)
         return self.encoder(x)
     
-    def run_layers(self, x: torch.Tensor, valid_tokens: torch.tensor | None = None, cache = None, prefill = False):
+    def run_layers(self, x: torch.Tensor, x_tok_ids: torch.Tensor | None = None, cache = None, prefill = False):
         """
         Runs latent through all layers followed by layer norm
 
@@ -106,13 +145,17 @@ class BaseModel(nn.Module, ABC):
             x (torch.Tensor): output of shape (``B``, ``L``, ``E``)
             kv_cache (dic[str -> torch.Tensor]): Contains: "K", "V" (Optional: "c_1", "c_2", "c_3")
         """
+        attn_mask = self.compute_attn_mask(x, x_tok_ids) # accept leakage with cannon
+        if cache is not None:
+            attn_mask = None
+        
         kv_cache = None
         for (i, layer) in enumerate(self.layers):
             if cache is not None:
                 kv_cache = cache[i]
-
+            
             # (B, L, E) -> (B, L, E)
-            x, kv_cache_new = layer(x, valid_tokens, kv_cache, prefill)
+            x, kv_cache_new = layer(x, attn_mask, kv_cache, prefill)
 
             if cache is not None:
                 cache[i] = kv_cache_new

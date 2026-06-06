@@ -22,27 +22,25 @@ class Autoreg_Model(BaseModel):
             ground_truth (torch.Tensor): input of shape (``B``, ``L``) where contains ground truth class indices
 
         Returns:
-            attn_output (torch.Tensor): output of shape (B, L, E)
+            x (torch.Tensor): output of shape (B, L, N)
         """
-        # (B, L)
-        valid_tokens = x != self.pad_id
 
         # (B, L) -> (B, L, E)
-        x = self.encode(x)
+        z = self.encode(x)
         
         # (B, L, E) -> (B, L, E)
-        x, _ = self.run_layers(x, valid_tokens)
+        z, _ = self.run_layers(z, x)
 
         # (B, L, E) -> (B, L, N)
-        x = self.decode(x)
+        logits = self.decode(z)
         
         loss = None
         if ground_truth is not None:
             # (B, L, N) -> scalar
-            loss = self.autoreg_loss(x, ground_truth)
+            loss = self.autoreg_loss(logits, ground_truth)
         
         # (B, L, N)
-        return x, loss # need to softmax later on
+        return logits, loss, {"loss_decode": loss}# need to softmax later on
     
     def prefill(self, x: torch.Tensor):
         """
@@ -84,7 +82,7 @@ class Autoreg_Model(BaseModel):
 
         return cache
 
-    
+    @torch.no_grad()
     def generate(self, x: torch.Tensor, max_gen: int):
         """
         Args:

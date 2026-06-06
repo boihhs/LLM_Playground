@@ -14,7 +14,7 @@ def generate_text(prompt, model, tokenizer, configs, length):
     # (B, L) = (1, L)
     ids = torch.tensor(prompt_ids, dtype=torch.int, device=configs.device).unsqueeze(0)
     out_ids = model.generate(ids, length)
-    return tokenizer.decode(out_ids[0].tolist())
+    return tokenizer.decode(out_ids[0].tolist(), skip_special_tokens=False)
 
 def main():
     configs = Config()
@@ -23,7 +23,9 @@ def main():
     length = 200
     prompt = input("Type your prompt below:\n")
     response = generate_text(prompt, model, tokenizer, configs, length)
+    print("Resposne is Below:")
     print(response)
 
 if __name__ == "__main__":
+    
     main()

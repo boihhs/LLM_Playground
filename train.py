@@ -1,5 +1,7 @@
+from __future__ import annotations
 from src.dataset.dataloader import DataLoader
 from src.models.autregressive_model import Autoreg_Model
+from src.models.flow_model import Flow_Model
 from dataclasses import dataclass
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -25,10 +27,10 @@ class Config:
     nlayers: int = 6
     dropout: float = 0.1
 
-    shared_encoder_decoder = False
-    canon = False
+    shared_encoder_decoder = True
+    canon = True
     canon_length: int = 3
-    is_causal = True
+    is_causal = False
     bias = True
 
     lr: float = 3e-4
@@ -55,31 +57,38 @@ def config_optimizer(model, config):
     )
 
 @torch.no_grad()
-def eval(model: Autoreg_Model, eval_batcher: DataLoader, configs: Config):
+def eval(model: Autoreg_Model | Flow_Model, eval_batcher: DataLoader, configs: Config):
     model.eval()
     x, y = eval_batcher.get_batch(configs.B, configs.L)
-    _, loss = model(x, y)
+  
+    _, loss, loss_dic = model(x, y)
+    return loss.item(), loss_dic
 
-    return loss.item()
 
-
-def train(model: Autoreg_Model, train_batcher: DataLoader, eval_batcher: DataLoader, optimizer, configs: Config, writer: SummaryWriter):
+def train(model: Autoreg_Model | Flow_Model, train_batcher: DataLoader, eval_batcher: DataLoader, optimizer, configs: Config, writer: SummaryWriter):
     model.train()
 
     for i in range(configs.num_steps):
         if i % configs.eval_interval == 0:
-            eval_loss = eval(model, eval_batcher, configs)
+            eval_loss, loss_dic = eval(model, eval_batcher, configs)
             model.train()
             writer.add_scalar("Loss/eval", eval_loss, i)
+            for name,value in loss_dic.items():
+                if value is not None:
+                    writer.add_scalar(f"Loss/eval_{name}", value.item(), i)
             writer.flush()
             torch.save(model, configs.model_path)
 
         x, y = train_batcher.get_batch(configs.B, configs.L)
 
-        _, loss = model(x, y)
+        _, loss, loss_dic = model(x, y)
+     
         train_loss = loss.item()
-
         writer.add_scalar("Loss/train", train_loss, i)
+
+        for name,value in loss_dic.items():
+            if value is not None:
+                writer.add_scalar(f"Loss/train_{name}", value.item(), i)
 
         optimizer.zero_grad()
         loss.backward()
@@ -89,10 +98,12 @@ def main():
     config = Config()
     writer = SummaryWriter()
 
-    train_batcher = DataLoader(config.train_path, config.token_dtype, config.device)
-    eval_batcher = DataLoader(config.train_path, config.token_dtype, config.device)
-
-    model = Autoreg_Model(config)
+    train_batcher = DataLoader(config, train=True)
+    eval_batcher = DataLoader(config, train=False)
+    if config.is_causal:
+        model = Autoreg_Model(config)
+    else:
+        model = Flow_Model(config)
     total_params = sum(p.numel() for p in model.parameters())
     print(f'Total number of parameters: {total_params}')
 
