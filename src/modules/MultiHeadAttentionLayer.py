@@ -100,7 +100,7 @@ class MultiHeadAttentionLayer(nn.Module):
         if self.canon:
             if (kv_cache is not None) and (not prefill):
                 # (B, C-1, E) + (B, 1, E) -> (B, C, E)
-                cache = torch.cat((kv_cache["c_1"][:, 1:, :], x_norm), dim=1)
+                cache = torch.cat((kv_cache["c_1"], x_norm), dim=1)[:, -self.canon_length:, :]
                 x_norm = x_norm + self.canon_layer_1(x_norm, kv_cache["c_1"])
                 kv_cache["c_1"] = cache
             else:
@@ -153,7 +153,7 @@ class MultiHeadAttentionLayer(nn.Module):
 
         if self.canon:
             if (kv_cache is not None) and (not prefill):
-                cache = torch.cat((kv_cache["c_2"][:, 1:, :], x_norm), dim=1)
+                cache = torch.cat((kv_cache["c_2"], x_norm), dim=1)[:, -self.canon_length:, :]
                 x_norm = x_norm + self.canon_layer_2(x_norm, kv_cache["c_2"])
                 kv_cache["c_2"] = cache
             else:
@@ -162,19 +162,21 @@ class MultiHeadAttentionLayer(nn.Module):
                     # (B, C, E)
                     kv_cache["c_2"] = x_norm[:, -lenght:, ]
 
-        # (B, L, E) -> (B, L, E*3) -> (B, L, E*3) -> (B, L, E)
+        # (B, L, E) -> (B, L, E*4)
         hidden = self.up_proj(x_norm)
+        
         if self.canon:
             if (kv_cache is not None) and (not prefill):
-                cache = torch.cat((kv_cache["c_3"][:, 1:, :], hidden), dim=1)
+                cache = torch.cat((kv_cache["c_3"], hidden), dim=1)[:, -self.canon_length:, :]
                 hidden = hidden + self.canon_layer_3(hidden, kv_cache["c_3"])
                 kv_cache["c_3"] = cache
             else:
                 hidden = hidden + self.canon_layer_3(hidden)
                 if prefill:
-                    # (B, C, E)
+                    # (B, C, E*4)
                     kv_cache["c_3"] = hidden[:, -lenght:, ]
 
+        # (B, L, E*4) -> (B, L, E*4) -> (B, L, E)
         output = x + self.dropout_layer(self.down_proj(self.non_linear(hidden)))
 
         return output, kv_cache

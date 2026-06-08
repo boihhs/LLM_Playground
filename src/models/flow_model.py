@@ -26,6 +26,9 @@ class Flow_Model(BaseModel):
                   z_pred: torch.Tensor,
                   t: torch.Tensor,
                   prompt_mask: torch.Tensor,
+                  pad_mask: torch.Tensor,
+                  pad_weight: int,
+  
         ):
         """
         ELF Loss: (https://arxiv.org/pdf/2605.10938)
@@ -37,16 +40,22 @@ class Flow_Model(BaseModel):
             z_pred (torch.Tensor): input of shape (``B``, ``L``, ``E``) (Contains predicted encode(x))
             t (torch.Tensor): input of shape (``B``, ``1``, ``1``) where contains the time for the flow matching
             prompt_mask (torch.Tensor): input of shape (``B``, ``L``, ``1``) where contains True if part of the mask
+            pad_mask (torch.Tensor): input of shape (``B``, ``L``, ``1``) where contains True if it is a pad
+            pad_weight (int): weight for pad tokens in MSE
 
         Returns:
             loss (scalar)
         """
-
         # (B, L, E)
-        v = (x_clean - e) * (~prompt_mask)
-        v_pred = ((z_pred - z) / (1 - t)) * (~prompt_mask)
-        loss_flow = self.mse(v_pred, v)
-        # loss_flow = self.mse(x_clean, z_pred)
+        # v = (x_clean - e) * (~prompt_mask)
+        # v = v * (~pad_mask) + v * (pad_mask) * pad_weight**(.5)
+        # v_pred = ((z_pred - z) / (1 - t)) * (~prompt_mask)
+        # v_pred = v_pred * (~pad_mask) + v_pred * (pad_mask) * pad_weight**(.5)
+        # loss_flow = self.mse(v_pred, v)
+
+        x_clean = x_clean * (~pad_mask) + x_clean * (pad_mask) * pad_weight**(.5)
+        z_pred = z_pred * (~pad_mask) + z_pred * (pad_mask) * pad_weight**(.5)
+        loss_flow = self.mse(x_clean, z_pred)
       
         return loss_flow
     
@@ -65,21 +74,34 @@ class Flow_Model(BaseModel):
         eps = 1e-2
         B, L = x.shape
 
-        logits = loss = loss_flow = loss_decode = None
+        logits = loss = loss_flow = loss_decode = loss_decode_clean = None
 
         progress = (self.i / self.num_steps)
-        percent = .8 * (self.i / self.num_steps)**2
+
+        if progress <= .4:
+            percent = 0.0
+        elif progress <= .8:
+            percent = .8 * ((self.i - .4*self.num_steps) / (self.num_steps-.4*self.num_steps))**(.7)
+        else:
+            percent = .8
+
+        # (B, L)
+        pad_mask = (x == self.pad_id)
+
+        # (scalar)    
+        pad_count = torch.sum(pad_mask)
+        pad_weight = (1 - pad_count / (L * B)).clamp_min(.01)
 
         # (B)
         prompt_len = torch.randint(0, int(L*.30), (B,), device=self.device)
         # (L) -> (1, L)
         seq = torch.arange(1, L + 1, 1, device=self.device, dtype=torch.int)[None, :]
         # (1, L) + [(B) -> (B, 1)] ->(B, L) -> (B, L, 1)
-        prompt_mask = (seq <= prompt_len[:, None])[:, :, None]
+        prompt_mask = ((seq <= prompt_len[:, None]) & (~pad_mask))[:, :, None]
 
         if torch.rand(()) < percent:
             # (B)
-            t = torch.nn.functional.sigmoid(torch.randn((B), **self.factory_kwargs) * .8 - 1.5)
+            t = torch.nn.functional.sigmoid(torch.randn((B), **self.factory_kwargs) * 2 - 1.5)
             t = t.clamp(0, 1 - eps)
 
             # (B) -> (B, 1) -> (B, E) -> (B, 1, E)
@@ -105,16 +127,28 @@ class Flow_Model(BaseModel):
             # (B, L, E) -> (B, L, E)
             z_pred, _ = self.run_layers(z_in)
 
+            # (B, L, E) -> (B, L, N)
+            # logits = self.decode(z_pred)
+
+            # (B, L) -> (B, L, 1)
+            pad_mask = pad_mask[:, :, None]
+
             if ground_truth is not None:
                 # (B, L, N) -> scalar
-                loss = self.Flow_Loss(x_clean=x_clean_det, 
+                loss_flow = self.Flow_Loss(x_clean=x_clean_det, 
                                     e=e, 
                                     z=z, 
                                     z_pred=z_pred, 
                                     t=t, 
                                     prompt_mask=prompt_mask,
+                                    pad_mask=pad_mask,
+                                    pad_weight=pad_weight
                         )
-                loss_flow = loss
+                
+                 # (B, L, N) -> scalar
+                # loss_decode = self.autoreg_loss(x=logits, ground_truth=ground_truth, pad_weight=pad_weight)
+
+                loss = loss_flow
 
         else:
             # (B, L, E)
@@ -128,7 +162,7 @@ class Flow_Model(BaseModel):
             # (B) -> (B, E) -> (B, 1, E)
             mode_emb = self.mode_emb(torch.ones(B, dtype=torch.long, device=self.device))[:, None, :]
             # (B, L, E)
-            e_dec = torch.randn_like(x_clean, **self.factory_kwargs) * 2
+            e_dec = torch.randn_like(x_clean, **self.factory_kwargs) * 5
             # (B, L, E)
             z_dec = p * x_clean + (1 - p) * e_dec
             z_dec = (prompt_mask) * x_clean + (~prompt_mask) * z_dec
@@ -140,15 +174,17 @@ class Flow_Model(BaseModel):
 
             # (B, L, E) -> (B, L, N)
             logits = self.decode(z_pred_dec)
+            # logits_clean = self.decode(x_clean)
             if ground_truth is not None:
                 # (B, L, N) -> scalar
-                loss = self.autoreg_loss(x=logits, ground_truth=ground_truth)
-                loss_decode = loss
+                loss_decode = self.autoreg_loss(x=logits, ground_truth=ground_truth, pad_weight=pad_weight)
+                # loss_decode_clean = self.autoreg_loss(x=logits_clean, ground_truth=ground_truth, pad_weight=pad_weight)
+                loss = loss_decode
         
         
-        
-        self.i = self.i + 1
-        return logits, loss, {"loss_flow": loss_flow, "loss_decode": loss_decode, "percent": torch.tensor([percent])}
+        if self.training:
+            self.i = self.i + 1
+        return logits, loss, {"loss_flow": loss_flow, "loss_decode": loss_decode, "loss_decode_clean": loss_decode_clean, "percent": torch.tensor([percent])}
     
     @torch.no_grad()
     def generate(self,
@@ -167,7 +203,7 @@ class Flow_Model(BaseModel):
         self.eval()
 
         # (1, T)
-        ts = torch.linspace(0.01, 1.0, 100, **self.factory_kwargs).unsqueeze(0)
+        ts = (torch.linspace(0.00, 1.0, 200, **self.factory_kwargs).unsqueeze(0))**2
 
         # (B, L_p)
         B, L_p = prompt.shape

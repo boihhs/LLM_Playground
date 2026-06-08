@@ -76,7 +76,7 @@ class Autoreg_Model(BaseModel):
              "V": torch.empty((B, self.nheads, 0, E_head), **self.factory_kwargs),
              "c_1": torch.empty((B, 0, self.E), **self.factory_kwargs),
              "c_2": torch.empty((B, 0, self.E), **self.factory_kwargs),
-             "c_3": torch.empty((B, 0, self.E), **self.factory_kwargs),}
+             "c_3": torch.empty((B, 0, self.E * 4), **self.factory_kwargs),}
             for _ in range(self.nlayers)
         ]
 

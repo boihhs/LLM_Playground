@@ -34,6 +34,7 @@ class BaseModel(nn.Module, ABC):
         self.bias = config.bias
         self.shared_encoder_decoder = config.shared_encoder_decoder
         self.num_steps = config.num_steps
+        self.vocab_size = config.vocab_size
         self.device = config.device
 
         padding_idx = self.pad_id
@@ -64,16 +65,15 @@ class BaseModel(nn.Module, ABC):
         else:
             self.decoder_bias = nn.Parameter(torch.zeros(config.vocab_size, **factory_kwargs))
 
-        weight = None
         if not self.is_causal:
             padding_idx = -100
-            weight = torch.ones((config.vocab_size), **self.factory_kwargs)
-            weight[self.pad_id] = 1e-4
-        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=padding_idx, reduction="mean", weight=weight)
+            
+        self.cross_entropy = nn.CrossEntropyLoss(ignore_index=padding_idx, reduction="mean")
 
     def autoreg_loss(self,
                   x: torch.Tensor,
                   ground_truth: torch.Tensor,
+                  pad_weight: int | None = None,
         ):
         """
         Cross Entropy Loss
@@ -81,11 +81,20 @@ class BaseModel(nn.Module, ABC):
         Args:
             x (torch.Tensor): input of shape (``B``, ``L``, ``E``) (Contains presoftmax decoder projection)
             ground_truth (torch.Tensor): input of shape (``B``, ``L``) where contains ground truth class indices
+            pad_weight (int): weight for pad tokens in CE
 
         Returns:
             loss (scalar)
         """
         B, L, N = x.shape
+
+        if pad_weight is not None:
+            weight = torch.ones((self.vocab_size), **self.factory_kwargs)
+            weight[self.pad_id] = pad_weight
+            self.cross_entropy.weight = weight
+        else:
+            self.cross_entropy.weight = None
+
         loss = self.cross_entropy(x.reshape((B*L, N)), ground_truth.reshape((B*L)))
         return loss
     
@@ -146,7 +155,7 @@ class BaseModel(nn.Module, ABC):
             kv_cache (dic[str -> torch.Tensor]): Contains: "K", "V" (Optional: "c_1", "c_2", "c_3")
         """
         attn_mask = self.compute_attn_mask(x, x_tok_ids) # accept leakage with cannon
-        if cache is not None:
+        if (cache is not None):
             attn_mask = None
         
         kv_cache = None

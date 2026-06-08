@@ -19,7 +19,7 @@ class Config:
     pad_id: int = 2
     eot_id: int = 1
 
-    B: int = 32
+    B: int = 64
     L: int = 256
 
     E: int = 256
